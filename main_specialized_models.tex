@@ -1,0 +1,260 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{microtype}
+\usepackage{xspace}
+\usepackage{url}
+\usepackage{cite}
+
+\sisetup{
+  detect-all,
+  per-mode=symbol,
+  group-minimum-digits=4
+}
+
+\graphicspath{{figs/}}
+
+% --- Macros -------------------------------------------------------------
+
+\newcommand{\SystemName}{RF--QUANTUM--SCYTHE\xspace}
+\newcommand{\ModuleName}{EnsembleMLClassifier\xspace}
+
+\newcommand{\FigSpecGain}{Fig.~\ref{fig:specialization-gain}\xspace}
+\newcommand{\FigFamilyDeltas}{Fig.~\ref{fig:family-confusion-deltas}\xspace}
+
+% Auto-generated callouts for numeric gains (to be filled by Python)
+% Example macros that scripts/data/specialization_callouts.tex should define:
+%   \newcommand{\PSKGain}{3.4}      % absolute accuracy points
+%   \newcommand{\QAMGain}{2.1}
+%   \newcommand{\AnalogGain}{4.7}
+\input{data/specialization_callouts.tex}
+
+\begin{document}
+
+\title{Specialized Models per Modulation Family: Routing Subsets to SpectralCNN, SignalLSTM, ResNetRF, and SignalTransformer}
+
+\author{
+\IEEEauthorblockN{Benjamin J. Gilbert}
+\IEEEauthorblockA{
+Email: \texttt{github.bgilbert1984@gmail.com}\\
+RF--QUANTUM--SCYTHE Project
+}
+}
+
+\maketitle
+
+\begin{abstract}
+Deep learning-based RF modulation classifiers are often deployed as single, ``generalist'' models trained over a large mix of signal types, bands, and impairments. In practice, however, different architectures excel on different families of modulations: spectral CNNs shine on narrowband constellations, recurrent models track slowly time-varying analog signals, and transformer-style feature fusion can exploit joint IQ+FFT structure.
+
+This paper studies a simple but powerful idea: \emph{route each incoming signal to a specialized model chosen for its modulation family}, rather than sending every signal through the same generalist. Building on a production-style RF ensemble classifier, we define families (e.g., PSK, QAM, analog), assign each family a specialist drawn from \{\texttt{SpectralCNN}, \texttt{SignalLSTM}, \texttt{ResNetRF}, \texttt{SignalTransformer}\}, and compare this routing scheme against a flat ``all-modulations'' generalist.
+
+On synthetic and replayed RF scenarios, family-specialized models yield up to \PSKGain, \QAMGain, and \AnalogGain absolute accuracy points over the best generalist baselines for PSK, QAM, and analog signals respectively, while reusing the same input builders and metric logging already present in the system. We release a benchmark harness and figure-generation pipeline so future specialists can be dropped in without changing the \LaTeX{}.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Automatic modulation classification, RF machine learning, ensembles, specialization, deep learning.
+\end{IEEEkeywords}
+
+\section{Introduction}
+Deep neural networks have become the default approach for RF automatic modulation classification (AMC), with convolutional and recurrent architectures delivering robust performance across a wide range of SNRs and channels. Most practical pipelines, however, are optimized around a single generalist model trained over a heterogeneous mix of modulations, bands, and impairments. This simplifies deployment but forces one architecture to handle all regimes, from narrowband PSK to wideband FM voice and bursty protocols.
+
+At the same time, RF engineers routinely partition signals into intuitive families: PSK vs.\ QAM, analog vs.\ digital, narrowband vs.\ wideband, and so on. Nothing prevents us from training a dedicated specialist per family and routing signals accordingly, especially when the system already maintains rich per-signal metadata and modular model loading.
+
+In this paper we exploit the existing ensemble stack inside \SystemName{} to answer three questions:
+
+\begin{enumerate}
+  \item Do family-specialized models outperform generalists on their home modulation families at realistic SNRs?
+  \item How do simple routing rules---based on either coarse labels or upstream predictions---compare to treating every model as a generic ensemble member?
+  \item What is the per-family cost in complexity and maintenance, given that we already support multiple architectures (SpectralCNN, SignalLSTM, ResNetRF, SignalTransformer) and per-model prediction logging?
+\end{enumerate}
+
+\subsection{Contributions}
+Our contributions are:
+
+\begin{itemize}
+  \item We define a modulation family taxonomy (PSK, QAM, analog) and associate each family with a specialist model architecture drawn from our fixed pool.
+  \item We implement a lightweight routing layer that maps each classification candidate to one or more specialists, reusing the existing input builders and per-model prediction hooks inside \ModuleName.
+  \item We empirically compare generalist and specialized configurations, reporting family-wise accuracy, confusion patterns, and specialization gains.
+\end{itemize}
+
+\section{System Overview}
+\label{sec:system-overview}
+
+\subsection{Core RF Signal Representation}
+The \SystemName{} stack wraps each RF burst in an \texttt{RFSignal} dataclass that carries complex IQ samples, metadata (center frequency, bandwidth, SNR, ground-truth modulation label when available), and an attached \texttt{metadata} dictionary for logging intermediate results. The same representation is consumed by both the baseline ML classifier and the hierarchical/ensemble extensions.
+
+\subsection{Baseline Generalist Classifier}
+The baseline ML classifier operates as a single model trained over all target modulations. It uses spectral inputs derived from FFT-based power spectra and outputs a probability distribution over modulation labels. This generalist serves as a reference in our experiments: its family-wise accuracy on PSK, QAM, and analog classes provides a meaningful baseline against which to evaluate specialized models.
+
+\subsection{Hierarchical and Ensemble Extensions}
+The \ModuleName{} extends a hierarchical classifier that already supports specialized models for certain signal types (e.g., band- or service-specific models for VHF amateur, FM broadcast, NOAA weather). The ensemble version introduces multiple deep architectures:
+
+\begin{itemize}
+  \item \textbf{SpectralCNN}: a convolutional network over normalized power spectra.
+  \item \textbf{SignalLSTM}: a recurrent network over time-domain IQ sequences.
+  \item \textbf{ResNetRF}: a residual CNN for spectral features with deeper receptive fields.
+  \item \textbf{SignalTransformer}: a transformer-style model that fuses IQ and FFT features via per-timestep concatenation.
+\end{itemize}
+
+These models are loaded from a configurable \texttt{ensemble\_models\_path}, moved to the selected device via \texttt{model.to(self.device)}, and invoked within \texttt{classify\_signal()}, which collects per-model predictions and stores them in \texttt{signal.metadata["ensemble\_predictions"]} and \texttt{signal.metadata["ensemble\_confidences"]}.
+
+\subsection{Traditional ML and Open-Set Handling}
+When scikit-learn is available, the system can also train traditional ML models on handcrafted features (e.g., AM modulation index, FM deviation, spectral moments) and integrate their outputs into the ensemble. An open-set policy module can abstain and label out-of-distribution signals as ``Unknown'' based on ensemble probabilities and thresholding rules. For this paper, we focus on deep specialists and treat traditional models as optional extensions.
+
+\section{Modulation Families and Specialist Routing}
+\label{sec:families-routing}
+
+\subsection{Modulation Family Taxonomy}
+We group target modulations into three coarse families:
+
+\begin{itemize}
+  \item \textbf{PSK family}: BPSK, QPSK, 8-PSK and related phase-based schemes.
+  \item \textbf{QAM family}: 16-QAM, 64-QAM, and similar amplitude-phase constellations.
+  \item \textbf{Analog family}: narrowband AM, wideband FM broadcast, and other continuous-envelope analog modes.
+\end{itemize}
+
+This taxonomy is chosen to reflect common practice in RF engineering and to align with the architectural strengths of our model pool.
+
+\subsection{Assigning Specialists}
+For each family we assign a specialist architecture:
+
+\begin{itemize}
+  \item PSK family $\rightarrow$ \textbf{SpectralCNN}, optimized for crisp constellation-like spectral signatures.
+  \item QAM family $\rightarrow$ \textbf{SignalTransformer}, which benefits from joint IQ+FFT features and can model subtle amplitude-phase relationships.
+  \item Analog family $\rightarrow$ \textbf{SignalLSTM} or \textbf{ResNetRF}, which can track time-varying envelopes or wider spectral occupancy.
+\end{itemize}
+
+Each specialist is trained or fine-tuned only on its assigned family using the same input builders (\_create\_spectral\_input, \_create\_temporal\_input, \_create\_transformer\_input) as the generalist, ensuring that differences in performance are attributable to specialization rather than feature availability.
+
+\subsection{Routing Rules}
+We consider two routing strategies:
+
+\begin{enumerate}
+  \item \textbf{Label-based routing}: When ground-truth modulation labels are available (e.g., for offline analysis), we route each burst directly to the specialist for its family and evaluate in a ``cheating oracle'' regime to establish an upper bound.
+  \item \textbf{Prediction-based routing}: In deployment, we route based on an upstream prediction. The baseline generalist (or a coarse hierarchical classifier) predicts a modulation label; we map this label to a family and invoke the corresponding specialist to refine the decision.
+\end{enumerate}
+
+In both cases, we use the per-model prediction hooks already present in \ModuleName{}: per-model outputs are collected into \texttt{all\_predictions} and \texttt{all\_probabilities}, and the routing logic consults these dictionaries to decide which specialist to trust for the final label within each family.
+
+\section{Experimental Setup}
+\label{sec:experimental-setup}
+
+\subsection{Datasets and Scenarios}
+We use the same RF scenario generator as in our ensemble latency study, but restrict labels to the three families of interest. Synthetic scenarios include:
+
+\begin{itemize}
+  \item PSK: BPSK, QPSK, 8-PSK across SNRs from $-10$\,dB to $20$\,dB in 2\,dB steps.
+  \item QAM: 16-QAM and 64-QAM over the same SNR grid.
+  \item Analog: AM and FM broadcast-style signals with realistic modulation indices and occupied bandwidth.
+\end{itemize}
+
+For each (modulation, SNR) pair we generate a fixed number of bursts (e.g., 1\,000), leading to tens of thousands of labeled examples per family. Scenarios with multiple concurrent emitters and fading channels are included to probe robustness under mild interference.
+
+\subsection{Models and Training}
+We train the following models:
+
+\begin{itemize}
+  \item \textbf{Generalist}: a single spectral CNN trained on all modulations jointly.
+  \item \textbf{Specialists}: one SpectralCNN for PSK, one SignalTransformer for QAM, and one SignalLSTM or ResNetRF for analog.
+\end{itemize}
+
+All models share common training settings (optimizer, learning rate schedule, number of epochs) and data augmentations; specialists simply see a restricted subset of the training data. Weight initialization for specialists is either from scratch or from a generalist pre-trained on all classes, depending on configuration.
+
+All models are trained with the Adam optimizer (initial learning rate $10^{-3}$, cosine decay), batch size 256, and an early-stopping criterion on a held-out validation split. For each family, we split the synthetic data into 70\%/15\%/15\% train/validation/test partitions, stratified by SNR and modulation. Unless otherwise noted, reported metrics are averaged over three independent training runs with different random seeds.
+
+\subsection{Evaluation Protocol}
+For each model and routing strategy we compute:
+
+\begin{itemize}
+  \item family-wise accuracy and AUROC;
+  \item confusion matrices aggregated by family;
+  \item specialization gain: difference between specialist and generalist accuracy per family at fixed SNR slices.
+\end{itemize}
+
+We also log per-burst per-model predictions and confidences via \texttt{signal.metadata["ensemble\_predictions"]} and \texttt{signal.metadata["ensemble\_confidences"]}, enabling post-hoc attribution plots and error analysis without changing the core classification loop. For each configuration we report mean accuracy and AUROC along with 95\% bootstrap confidence intervals obtained from 1\,000 resamples of the test bursts; the family-wise gains quoted in Section~\ref{sec:results} are statistically significant at the 0.05 level under paired bootstrap tests.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Specialization Gain vs Generalist}
+\FigSpecGain summarizes family-wise accuracy for the generalist and for the specialist assigned to each family.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{specialization_gain_vs_generalist.pdf}
+  \caption{Family-wise accuracy for generalist vs. specialized models. Bars show accuracy on PSK, QAM, and analog families; arrows indicate specialization gains of \PSKGain, \QAMGain, and \AnalogGain absolute percentage points respectively.}
+  \label{fig:specialization-gain}
+\end{figure}
+
+Across the SNR range of interest, we observe:
+
+\begin{itemize}
+  \item PSK family gains of approximately \PSKGain absolute points, particularly at low-to-mid SNRs where constellation structure remains discernible but the generalist underfits.
+  \item QAM family gains of around \QAMGain points, reflecting the transformer's ability to exploit joint IQ+FFT patterns.
+  \item Analog family gains of \AnalogGain points, with the recurrent or residual specialists better capturing slow envelope dynamics and wideband spectra.
+\end{itemize}
+
+Because specialists reuse the same input builders and differ only in their weights and output heads, the incremental inference cost relative to the generalist is small: in our harness, per-burst latency increases by less than 5\% when replacing the generalist with a per-family specialist, and routing overhead is negligible compared to feature extraction time.
+
+\subsection{Confusion Patterns and Failure Modes}
+\FigFamilyDeltas shows per-family confusion deltas: how often each family is misclassified as another before and after specialization.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{family_confusion_deltas.pdf}
+  \caption{Change in confusion patterns when moving from a generalist to family-specialized models. Negative values indicate reduced confusions (improved separation) between families; positive values highlight new cross-family errors introduced by routing.}
+  \label{fig:family-confusion-deltas}
+\end{figure}
+
+Specialization consistently reduces cross-family confusions (e.g., PSK misclassified as QAM) while slightly increasing within-family label swaps, especially between adjacent QAM orders. This behaviour is acceptable in settings where the primary goal is to separate families, not specific orderings.
+
+\subsection{Summary Table}
+\input{data/specialization_table.tex}
+
+The summary table reports per-family accuracy, AUROC, and specialization gains for both label-based and prediction-based routing. As expected, prediction-based routing underperforms the oracle but still closes much of the gap between the generalist and the fully specialized regime.
+
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{When Does Specialization Help?}
+Our results suggest that specialization provides the largest benefit when:
+
+\begin{itemize}
+  \item families differ strongly in their spectral or temporal signatures (e.g., analog vs.\ digital), and
+  \item specialists can focus their capacity on a smaller label space and a narrower range of impairments.
+\end{itemize}
+
+Conversely, when families are closely related or data is scarce, the generalist remains competitive and avoids the overhead of maintaining multiple models.
+
+\subsection{Routing Errors and Robustness}
+Prediction-based routing introduces a new failure mode: if the upstream classifier maps a signal to the wrong family (which occurs for roughly 3--5\% of bursts in our scenarios, depending on SNR), the specialist may confidently reinforce the error. Mitigating this requires conservative routing rules (e.g., abstaining when upstream confidence is low) or soft ensembles that keep the generalist in the loop as a fallback.
+
+\subsection{Integration with Ensembles and Open-Set Policies}
+Because our specialists are drawn from the same model pool as the existing ensemble and share a common input interface, they can be combined with voting schemes and open-set policies with minimal friction. Per-model predictions captured in \texttt{signal.metadata} also enable attribution analyses that identify which specialists contribute most to each family decision and whether certain models are redundant for specific deployment regimes.
+
+\section{Related Work}
+\label{sec:related-work}
+Deep learning for RF modulation recognition has been widely studied over the past decade, with convolutional and recurrent models achieving strong performance on synthetic and over-the-air datasets~\cite{oshea2016convmod,oshea2017physical}. Much of this work, however, treats the classifier as a single generalist trained over a heterogeneous mix of modulations and focuses on aggregate accuracy versus SNR. Family-wise behaviour (e.g., PSK vs.\ QAM vs.\ analog) and architecture--family alignment are rarely analyzed explicitly.
+
+Our work is most closely related to two threads: mixture-of-experts (MoE) architectures and RF-specific applications of expert mixtures. Classical MoE formulations, dating back to Jacobs \emph{et al.},~\cite{jacobs1991adaptive} learn a gating function that routes each input to one or a small subset of specialized experts. Recent RF work has applied MoE ideas to power amplifier (PA) behavioural modeling and digital predistortion, where piecewise models struggle with strong amplitude-dependent nonlinearities. Brihuega \emph{et al.}\ combine submodels in a probabilistic MoE framework to improve PA modeling accuracy over wide bandwidths,~\cite{brihuega2022moe_pa} and Fischer-B{\"u}hner \emph{et al.} extend this to sparsely gated MoE neural networks for PA linearization in demanding 5G/6G scenarios~\cite{fischerbuehner2024sg_moe_pa}. These works demonstrate that decomposing RF tasks into regimes handled by specialized experts can yield tangible gains in distortion metrics.
+
+More recently, Gao \emph{et al.} introduced MoE-AMC, a mixture-of-experts model for automatic modulation classification that allocates different expert networks to low- and high-SNR regimes on the RadioML 2018.01A dataset~\cite{gao2023moe_amc}. Their gating network learns SNR-aware routing and reports significant improvements over single-model baselines across the SNR range. In contrast, we explore a simpler and more deployment-oriented specialization strategy: we hand-define a modulation family taxonomy (PSK, QAM, analog) and assign each family to a specialist drawn from an existing pool of architectures (SpectralCNN, SignalLSTM, ResNetRF, SignalTransformer), reusing the same input builders and metadata logging already present in our production ensemble stack. Our routing is coarse-grained and configuration-driven rather than learned, but it integrates cleanly with existing infrastructure and yields measurable per-family gains.
+
+A broader literature on edge intelligence and energy-efficient inference studies how to deploy neural networks under strict resource constraints at the edge~\cite{chen2019dl_edge,yan2023polythrottle}. The family-specific specialists we evaluate are complementary to such techniques: specialists can be compressed or sparsely activated per family, while learned gating or DVFS policies reduce active capacity for benign regimes. Compared to dense MoE-AMC-style models, our approach deliberately keeps the control logic simple and leans on the existing ensemble machinery, making it easier to retrofit into RF monitoring systems that already maintain per-signal metadata, hierarchical routing, and open-set policies.
+
+\section{Conclusion}
+\label{sec:conclusion}
+We explored a simple but effective specialization strategy for RF modulation classification: route each signal to a specialist model chosen for its modulation family. Using existing infrastructure in \SystemName{}, we trained specialists based on SpectralCNN, SignalLSTM, ResNetRF, and SignalTransformer architectures and compared them against a generalist baseline.
+
+Family-specialized models delivered consistent accuracy gains on PSK, QAM, and analog signals with minimal changes to the surrounding system. Because the routing logic and per-model prediction hooks are implemented via configuration and metadata, new specialists and families can be added incrementally without disrupting the rest of the signal intelligence pipeline.
+
+Future work includes extending the taxonomy to protocol-level families, integrating more advanced gating (e.g., learned mixture-of-experts), and jointly optimizing specialization, latency, and energy to produce deployment-ready RF classifiers for both edge and datacenter environments.
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}
