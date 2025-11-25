@@ -1,0 +1,2 @@
+# Routing-Subsets-to-SpectralCNN-SignalLSTM-ResNetRF-and-SignalTransformer
+Deep neural networks have become the default approach for RF automatic modulation classification (AMC), with convolu- tional and recurrent architectures delivering robust performance across a wide range of SNRs and channels. Most practical pipelines, however, are optimized around a single generalist model trained over a heterogeneous mix
